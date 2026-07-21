@@ -1,0 +1,97 @@
+# Default values for kserve-ns-model-cache (Option C: pvc:// serving + podspec init).
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ConfigMap holding the Python populate script (mounted into the init container).
+populateScript:
+  # Mount path inside the init container.
+  mountPath: /opt/kserve-populate
+
+# Populate init container: runs the ConfigMap script on the STOCK image. No rebuild.
+populate:
+  image:
+    repository: kserve/storage-initializer
+    # Match the storage-initializer tag your cluster deploys
+    # (inferenceservice-config ConfigMap -> storageInitializer.image).
+    tag: latest
+    pullPolicy: IfNotPresent
+  # Where the cache PVC is mounted (writable) in the init container. The PVC root,
+  # so the model is written to <cacheRoot>/<subPath> == the pvc:// subPath.
+  cacheRoot: /cache
+  # Hugging Face cache dir (HF_HOME). Defaults to <cacheRoot>/.hf-home on the cache
+  # PVC, which is already mounted read-write in the init container -- no extra
+  # volume. Set explicitly because $HOME is often "/" under OpenShift's random-UID
+  # SCC, which would otherwise send the HF cache to the unwritable "/.cache".
+  # The global flock serializes downloads per namespace, so the shared on-PVC cache
+  # is race-safe. Set to e.g. /tmp for an ephemeral per-pod cache instead.
+  hfHome: ""
+  # Resources for the populate init container. Empty by default (no limits); set
+  # here for all models, or per model via models[].initResources.
+  resources: {}
+
+# Shared cache PVC (one per namespace; all models share it).
+cache:
+  pvc:
+    name: model-cache
+    # Use an existing PVC instead of creating one (takes precedence over name).
+    existingClaim: ""
+    # RWX-capable provisioner: nfs-csi, cephfs, efs, azurefile, ...
+    storageClassName: ""
+    # Access modes. ReadWriteMany shares the cache across nodes; ReadWriteOnce is
+    # enough when every pod using the cache is scheduled on the same node
+    # (node-level cache).
+    accessModes:
+      - ReadWriteMany
+    size: 500Gi
+
+# Hugging Face token for gated repos. KServe's own credential builder injects
+# HF_TOKEN from any ServiceAccount secret whose data has an "HF_TOKEN" key -- but
+# only into the webhook-created storage-initializer, which pvc:// does NOT create.
+# So this chart wires HF_TOKEN into the populate init container explicitly, using
+# the same "HF_TOKEN" key so one secret works both ways. Reference an existing
+# secret; empty name skips injecting HF_TOKEN. Create it with:
+#   kubectl create secret generic hf-secret --from-literal=HF_TOKEN=hf_xxx
+hf:
+  tokenSecret:
+    name: ""
+    key: HF_TOKEN
+
+# One InferenceService per entry, all sharing the cache PVC + populate script.
+#
+# Required:
+#   name      ISVC name
+#   hfUri     source URI the init container downloads, e.g. hf://owner/model[:revision]
+#   subPath   path inside the PVC for this model -- the SHARED KEY: it is both the
+#             init container's download destination and the pvc:// subPath the
+#             webhook mounts at /mnt/models. Rendered from this one value.
+#
+# Pass-through (merged into the rendered InferenceService; the chart only forces
+# predictor.volumes/initContainers and model.storageUri, and defaults
+# model.modelFormat to huggingface):
+#   predictor      -> spec.predictor   (e.g. minReplicas, maxReplicas, affinity, ...)
+#   model          -> spec.predictor.model (e.g. modelFormat, args, env, resources, ...)
+#   initResources  -> resources for the populate init container
+#   annotations    -> ISVC metadata.annotations
+models:
+  - name: mellum
+    hfUri: hf://JetBrains/Mellum2-12B-A2.5B-Thinking
+    subPath: hf/mellum
+    predictor:
+      minReplicas: 0
+    model:
+      modelFormat:
+        name: huggingface
+      args:
+        - --max-model-len=131072
+        - --reasoning-parser=qwen3
+        - --enable-auto-tool-choice
+        - --tool-call-parser=hermes
+      resources:
+        requests:
+          cpu: "4"
+          memory: 4Gi
+        limits:
+          cpu: "4"
+          memory: 20Gi
+          nvidia.com/gpu.shared: "1"

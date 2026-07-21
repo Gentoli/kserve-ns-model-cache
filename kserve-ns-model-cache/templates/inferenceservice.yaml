@@ -1,0 +1,68 @@
+{{- $cmName := include "kserve-ns-model-cache.populateConfigMapName" . -}}
+{{- $cacheClaim := .Values.cache.pvc.existingClaim | default .Values.cache.pvc.name -}}
+{{- $cacheVol := include "kserve-ns-model-cache.cacheVolumeName" . -}}
+{{- $scriptVol := include "kserve-ns-model-cache.scriptVolumeName" . -}}
+{{- $cacheRoot := .Values.populate.cacheRoot -}}
+{{- $scriptMount := .Values.populateScript.mountPath -}}
+{{- $image := printf "%s:%s" .Values.populate.image.repository .Values.populate.image.tag -}}
+{{- $pullPolicy := .Values.populate.image.pullPolicy -}}
+{{- $defaultInitResources := .Values.populate.resources -}}
+{{- $hfSecret := .Values.hf.tokenSecret.name -}}
+{{- $hfKey := .Values.hf.tokenSecret.key -}}
+{{- $hfHome := .Values.populate.hfHome | default (printf "%s/.hf-home" $cacheRoot) -}}
+{{- $volumes := list
+      (dict "name" $scriptVol "configMap" (dict "name" $cmName))
+      (dict "name" $cacheVol "persistentVolumeClaim" (dict "claimName" $cacheClaim))
+-}}
+{{- range .Values.models }}
+{{- /* populate init container (chart-managed) */ -}}
+{{- $env := list
+      (dict "name" "CACHE_ROOT" "value" $cacheRoot)
+      (dict "name" "HF_HOME" "value" $hfHome)
+      (dict "name" "HF_HUB_ENABLE_HF_TRANSFER" "value" "1")
+      (dict "name" "HF_XET_HIGH_PERFORMANCE" "value" "1")
+      (dict "name" "HF_XET_NUM_CONCURRENT_RANGE_GETS" "value" "8")
+-}}
+{{- if $hfSecret -}}
+  {{- $env = append $env (dict "name" "HF_TOKEN" "valueFrom" (dict "secretKeyRef" (dict "name" $hfSecret "key" $hfKey))) -}}
+{{- end -}}
+{{- $init := dict
+      "name" "populate-hf"
+      "image" $image
+      "imagePullPolicy" $pullPolicy
+      "command" (list "python3" "-u" (printf "%s/populate_hf.py" $scriptMount))
+      "args" (list .hfUri .subPath)
+      "env" $env
+      "volumeMounts" (list
+          (dict "name" $scriptVol "mountPath" $scriptMount "readOnly" true)
+          (dict "name" $cacheVol "mountPath" $cacheRoot))
+-}}
+{{- with (.initResources | default $defaultInitResources) -}}
+  {{- $_ := set $init "resources" . -}}
+{{- end -}}
+{{- /* model spec: user passthrough + chart-forced storageUri + modelFormat default */ -}}
+{{- $userModel := deepCopy (.model | default dict) -}}
+{{- $_ := mergeOverwrite $userModel (dict "storageUri" (printf "pvc://%s/%s" $cacheClaim .subPath)) -}}
+{{- $modelSpec := mergeOverwrite (dict "modelFormat" (dict "name" "huggingface")) $userModel -}}
+{{- /* predictor spec: user passthrough + chart-managed volumes/initContainers/model */ -}}
+{{- $userPredictor := deepCopy (.predictor | default dict) -}}
+{{- $predictorSpec := mergeOverwrite $userPredictor (dict
+      "volumes" $volumes
+      "initContainers" (list $init)
+      "model" $modelSpec)
+-}}
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "kserve-ns-model-cache.labels" $ | nindent 4 }}
+  {{- with .annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  predictor:
+    {{- toYaml $predictorSpec | nindent 4 }}
+{{- end }}

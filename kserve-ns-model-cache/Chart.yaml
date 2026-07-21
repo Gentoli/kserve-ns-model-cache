@@ -1,0 +1,18 @@
+apiVersion: v2
+name: kserve-ns-model-cache
+description: >-
+  Namespace-shared RWX model cache for KServe. A ClusterStorageContainer runs a
+  ConfigMap-delivered Python populate script on the stock kserve/storage-initializer
+  image (no custom image build) to fetch each Hugging Face model once (flock-guarded)
+  into a shared ReadWriteMany PVC, which kserve-container then serves from directly
+  (zero-copy via symlinks).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - kserve
+  - huggingface
+  - model-cache
+  - rwx
+  - serving
+home: https://kserve.github.io/website/

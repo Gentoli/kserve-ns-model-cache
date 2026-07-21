@@ -1,0 +1,32 @@
+{{ .Chart.Name }} {{ .Chart.Version }} installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Rendered resources:
+  - ConfigMap             {{ include "kserve-ns-model-cache.populateConfigMapName" . }}  (populate_hf.py)
+{{- if not .Values.cache.pvc.existingClaim }}
+  - PersistentVolumeClaim {{ .Values.cache.pvc.name }}  (ReadWriteMany)
+{{- else }}
+  - using existing PVC     {{ .Values.cache.pvc.existingClaim }}
+{{- end }}
+{{- range .Values.models }}
+  - InferenceService       {{ .name }}  <- {{ .hfUri }}  (pvc://{{ $.Values.cache.pvc.existingClaim | default $.Values.cache.pvc.name }}/{{ .subPath }})
+{{- end }}
+
+How it works:
+  Each InferenceService declares a "populate-hf" init container (stock
+  storage-initializer image + the ConfigMap script, no custom build). It downloads
+  the model into the shared PVC at its subPath once (flock-guarded). The ISVC's
+  storageUri is pvc://<claim>/<subPath>, so the webhook mounts that PVC subPath
+  read-only at /mnt/models on kserve-container -- the model is served zero-copy
+  (no symlinks, no per-pod copy). Both vLLM and the HuggingFace runtime read
+  /mnt/models, so no runtime rewiring is needed.
+
+Prerequisites / next steps:
+  1. RWX storage: set cache.pvc.storageClassName to an RWX provisioner
+     (nfs-csi, cephfs, efs, azurefile, ...) or supply cache.pvc.existingClaim.
+  2. Image tag: set populate.image.tag to the storage-initializer tag your
+     cluster deploys (inferenceservice-config ConfigMap -> storageInitializer.image).
+  3. Gated repos: create the HF token secret and set hf.tokenSecret.name:
+       kubectl -n {{ .Release.Namespace }} create secret generic hf-secret --from-literal=token=hf_xxx
+  4. vLLM: set models[].runtime to your vLLM ServingRuntime/ClusterServingRuntime name.
+  5. Verify:
+       kubectl -n {{ .Release.Namespace }} get isvc

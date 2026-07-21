@@ -1,0 +1,17 @@
+{{- if not .Values.cache.pvc.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.cache.pvc.name }}
+  labels:
+    {{- include "kserve-ns-model-cache.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.cache.pvc.accessModes | nindent 4 }}
+  {{- with .Values.cache.pvc.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.cache.pvc.size }}
+{{- end }}
