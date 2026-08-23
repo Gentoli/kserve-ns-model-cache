@@ -65,4 +65,4 @@ metadata:
 spec:
   predictor:
     {{- toYaml $predictorSpec | nindent 4 }}
-{{- end }}
+{{ end }}
