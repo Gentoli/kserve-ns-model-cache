@@ -5,7 +5,8 @@ model is fetched **once per namespace** (flock-guarded) into a shared PVC, and
 every `kserve-container` then serves it **directly off the PVC** — no per-pod
 download, **no symlinks, no per-pod copy**, and no cross-namespace hostPath
 sharing. Works with **vLLM** and the **HuggingFace** runtime (both read the
-standard `/mnt/models`).
+standard `/mnt/models`), including **GGUF** weights served by a plugin-enabled
+vLLM runtime.
 
 The fetch logic is a **Python script delivered via ConfigMap**, run on the
 **stock `kserve/storage-initializer` image** — **no custom image build** (no
@@ -66,7 +67,8 @@ Beyond the required `name` / `hfUri` / `subPath`, each model accepts free-form
 `predictor:` and `model:` blocks that are merged into the rendered
 InferenceService. The chart only forces `predictor.volumes` /
 `predictor.initContainers` and `model.storageUri` (derived from `hfUri`+`subPath`),
-and defaults `model.modelFormat` to `huggingface`. Everything else is yours:
+and defaults `model.modelFormat` to `huggingface` (`vLLM`/`1` + `runtime:
+kserve-vllmserver` for `gguf:` entries). Everything else is yours:
 
 ```yaml
 models:
@@ -91,6 +93,48 @@ models:
 
 For vLLM, point `model.runtime` at your vLLM ServingRuntime/ClusterServingRuntime.
 
+## GGUF models (vLLM + vllm-gguf-plugin)
+
+GGUF repos usually contain many quantized weights; this chart caches **exactly
+one** — the quant you serve — plus the small tokenizer/config files, never the
+whole repo. Use a `gguf:` block instead of `hfUri`:
+
+```yaml
+models:
+  - name: qwen3-8b-gguf
+    gguf:
+      repo: unsloth/Qwen3-8B-GGUF   # HF repo containing .gguf weights
+      quant: Q8_0                    # ONE quant to cache/serve
+      # file: Qwen3-8B-Q8_0.gguf     # optional exact filename override
+      # tokenizerRepo: ""            # optional tokenizer source, defaults to repo
+      # revision: ""                 # optional HF revision
+    subPath: hf/qwen3-8b-gguf        # still the shared key (init dest + pvc:// subPath)
+    predictor:
+      minReplicas: 0
+    model:
+      args:
+        - --max-model-len=32768
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+```
+
+For a `gguf:` entry the chart:
+
+- downloads only `*-<quant>.gguf` (all shards if split) and the tokenizer
+  allowlist (`config.json`, `tokenizer.json`/`tokenizer.model`, …) into the
+  subPath, flattening files to its root;
+- defaults `model.runtime` to `kserve-vllmserver` (a prebuilt image containing
+  `vllm-gguf-plugin`; override with `models[].model.runtime`) and
+  `model.modelFormat` to `vLLM`/`1`;
+- appends `--model=/mnt/models:<quant> --tokenizer=/mnt/models` after your
+  `model.args` so the plugin resolves `*-<quant>.gguf` in the mounted cache and
+  serves the cached tokenizer — no Hugging Face access in `kserve-container`.
+
+The vLLM GGUF plugin is auto-loaded from the image (`vllm.general_plugins`) and
+auto-detects the `dir:quant` model reference; no `--quantization`/`--load-format`
+flags are required.
+
 ## Values
 
 | Key | Default | Description |
@@ -107,6 +151,11 @@ For vLLM, point `model.runtime` at your vLLM ServingRuntime/ClusterServingRuntim
 | `hf.tokenSecret.name` / `.key` | `""` / `HF_TOKEN` | Existing secret holding the HF token (gated repos). |
 | `models[].name` | — | ISVC name. |
 | `models[].hfUri` | — | Source URI, e.g. `hf://owner/model[:revision]`. |
+| `models[].gguf.repo` | — | HF repo with `.gguf` weights (GGUF mode; replaces `hfUri`). |
+| `models[].gguf.quant` | — | One quantized file type to cache/serve, e.g. `Q8_0`, `Q4_K_M`. |
+| `models[].gguf.file` | `""` | Exact repo-relative filename override for non-standard names. |
+| `models[].gguf.tokenizerRepo` | `repo` | Where tokenizer/config files come from. |
+| `models[].gguf.revision` | `""` | HF revision for all GGUF downloads. |
 | `models[].subPath` | — | PVC path; the shared key (init dest + `pvc://` subPath). |
 | `models[].predictor` | `{}` | Merged into `spec.predictor` (e.g. `minReplicas`, `affinity`). |
 | `models[].model` | `{}` | Merged into `spec.predictor.model` (e.g. `args`, `resources`, `runtime`). |

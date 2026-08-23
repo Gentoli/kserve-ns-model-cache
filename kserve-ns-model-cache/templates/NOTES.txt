@@ -28,5 +28,9 @@ Prerequisites / next steps:
   3. Gated repos: create the HF token secret and set hf.tokenSecret.name:
        kubectl -n {{ .Release.Namespace }} create secret generic hf-secret --from-literal=token=hf_xxx
   4. vLLM: set models[].runtime to your vLLM ServingRuntime/ClusterServingRuntime name.
+     GGUF: set models[].gguf.repo/quant instead of hfUri -- the chart defaults
+     model.runtime to kserve-vllmserver (must be a plugin-enabled vLLM image) and
+     serves --model=/mnt/models:<quant> from the cached tokenizer at /mnt/models.
+     Only that one quant is downloaded to the PVC, never the whole repo.
   5. Verify:
        kubectl -n {{ .Release.Namespace }} get isvc

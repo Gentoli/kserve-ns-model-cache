@@ -15,6 +15,16 @@
       (dict "name" $cacheVol "persistentVolumeClaim" (dict "claimName" $cacheClaim))
 -}}
 {{- range .Values.models }}
+{{- $gguf := .gguf | default dict -}}
+{{- $isGguf := and (hasKey $gguf "repo") $gguf.repo -}}
+{{- if and (not (hasKey $gguf "repo")) (gt (len (keys $gguf)) 0) -}}
+  {{- fail (printf "models[%s].gguf.repo is required" .name) -}}
+{{- end -}}
+{{- if $isGguf -}}
+  {{- if not $gguf.quant -}}
+    {{- fail (printf "models[%s].gguf.quant is required" .name) -}}
+  {{- end -}}
+{{- end -}}
 {{- /* populate init container (chart-managed) */ -}}
 {{- $env := list
       (dict "name" "CACHE_ROOT" "value" $cacheRoot)
@@ -26,12 +36,28 @@
 {{- if $hfSecret -}}
   {{- $env = append $env (dict "name" "HF_TOKEN" "valueFrom" (dict "secretKeyRef" (dict "name" $hfSecret "key" $hfKey))) -}}
 {{- end -}}
+{{- $initArgs := list .hfUri .subPath -}}
+{{- if $isGguf -}}
+  {{- $initArgs = list "gguf" $gguf.repo $gguf.quant .subPath -}}
+  {{- if $gguf.file -}}
+    {{- $initArgs = append $initArgs "--file" -}}
+    {{- $initArgs = append $initArgs $gguf.file -}}
+  {{- end -}}
+  {{- if $gguf.tokenizerRepo -}}
+    {{- $initArgs = append $initArgs "--tokenizer-repo" -}}
+    {{- $initArgs = append $initArgs $gguf.tokenizerRepo -}}
+  {{- end -}}
+  {{- if $gguf.revision -}}
+    {{- $initArgs = append $initArgs "--revision" -}}
+    {{- $initArgs = append $initArgs $gguf.revision -}}
+  {{- end -}}
+{{- end -}}
 {{- $init := dict
       "name" "populate-hf"
       "image" $image
       "imagePullPolicy" $pullPolicy
       "command" (list "python3" "-u" (printf "%s/populate_hf.py" $scriptMount))
-      "args" (list .hfUri .subPath)
+      "args" $initArgs
       "env" $env
       "volumeMounts" (list
           (dict "name" $scriptVol "mountPath" $scriptMount "readOnly" true)
@@ -40,10 +66,23 @@
 {{- with (.initResources | default $defaultInitResources) -}}
   {{- $_ := set $init "resources" . -}}
 {{- end -}}
-{{- /* model spec: user passthrough + chart-forced storageUri + modelFormat default */ -}}
+{{- /* model spec: user passthrough + chart-forced storageUri + defaults */ -}}
 {{- $userModel := deepCopy (.model | default dict) -}}
-{{- $_ := mergeOverwrite $userModel (dict "storageUri" (printf "pvc://%s/%s" $cacheClaim .subPath)) -}}
-{{- $modelSpec := mergeOverwrite (dict "modelFormat" (dict "name" "huggingface")) $userModel -}}
+{{- if $isGguf -}}
+  {{- /* GGUF: defaults only apply when the user didn't set them. The runtime
+         (kserve-vllmserver) declares modelFormat vLLM/1; the appended
+         --model=/mnt/models:<quant> overrides the runtime's --model=/mnt/models
+         (argparse last-wins) and --tokenizer=/mnt/models serves the cached
+         tokenizer files. */ -}}
+  {{- $userModel = mergeOverwrite (dict "modelFormat" (dict "name" "vLLM" "version" "1")) $userModel -}}
+  {{- $userModel = mergeOverwrite (dict "runtime" "kserve-vllmserver") $userModel -}}
+  {{- $forcedArgs := list (printf "--model=/mnt/models:%s" $gguf.quant) "--tokenizer=/mnt/models" -}}
+  {{- $userModel = mergeOverwrite $userModel (dict "args" (concat (default (list) $userModel.args) $forcedArgs)) -}}
+{{- else -}}
+  {{- $userModel = mergeOverwrite (dict "modelFormat" (dict "name" "huggingface")) $userModel -}}
+{{- end -}}
+{{- $userModel = mergeOverwrite $userModel (dict "storageUri" (printf "pvc://%s/%s" $cacheClaim .subPath)) -}}
+{{- $modelSpec := $userModel -}}
 {{- /* predictor spec: user passthrough + chart-managed volumes/initContainers/model */ -}}
 {{- $userPredictor := deepCopy (.predictor | default dict) -}}
 {{- $predictorSpec := mergeOverwrite $userPredictor (dict

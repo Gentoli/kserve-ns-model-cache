@@ -66,6 +66,19 @@ hf:
 #             init container's download destination and the pvc:// subPath the
 #             webhook mounts at /mnt/models. Rendered from this one value.
 #
+# GGUF (vLLM + vllm-gguf-plugin) instead of hfUri:
+#   gguf:
+#     repo: unsloth/Qwen3-8B-GGUF   # HF repo containing .gguf weights
+#     quant: Q8_0                    # ONE quantized file to cache/serve (Q8_0, Q4_K_M, ...)
+#     file: ""                       # optional exact repo-relative filename override
+#     tokenizerRepo: ""              # tokenizer/config source, defaults to repo
+#     revision: ""                   # optional HF revision for all downloads
+#   Only the selected quant (plus shards, if split) and the small tokenizer/config
+#   files are downloaded to the cache -- never the whole multi-quant repo. The chart
+#   appends --model=/mnt/models:<quant> --tokenizer=/mnt/models to the model args and
+#   defaults model.runtime to kserve-vllmserver (the plugin-enabled vLLM runtime);
+#   set model.runtime to override for a differently-named runtime.
+#
 # Pass-through (merged into the rendered InferenceService; the chart only forces
 # predictor.volumes/initContainers and model.storageUri, and defaults
 # model.modelFormat to huggingface):
