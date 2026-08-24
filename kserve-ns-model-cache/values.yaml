@@ -47,7 +47,7 @@ vllm:
     enabled: false
     # Static VLLM_CACHE_ROOT path inside kserve-container; the per-model
     # separation comes from the mount subPath, not the env value.
-    mountPath: /vllm-cache
+    mountPath: /mnt/cache
     # Relative directory under the model subPath; the model name is appended.
     cacheDir: cache
 

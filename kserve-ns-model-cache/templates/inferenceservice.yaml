@@ -16,12 +16,6 @@
       (dict "name" $scriptVol "configMap" (dict "name" $cmName))
       (dict "name" $cacheVol "persistentVolumeClaim" (dict "claimName" $cacheClaim))
 -}}
-{{- if $ccEnabled -}}
-  {{- /* Second rw reference to the same RWX claim for the vLLM compile cache.
-         The webhook's read-only /mnt/models mount uses kserve-pvc-source and is
-         unaffected (it dedups volumeMounts by volume name, not claim). */ -}}
-  {{- $volumes = append $volumes (dict "name" "vllm-cache" "persistentVolumeClaim" (dict "claimName" $cacheClaim)) -}}
-{{- end -}}
 {{- /* subPath is the shared cache key: models reusing one must have an
        identical source, or each pod would replace the other's cache. */ -}}
 {{- $subPaths := dict -}}
@@ -118,15 +112,19 @@
   {{- $userModel = mergeOverwrite (dict "modelFormat" (dict "name" "huggingface")) $userModel -}}
 {{- end -}}
 {{- if $ccEnabled -}}
-  {{- /* Persist torch.compile AOT artifacts under <subPath>/<cacheDir>/<name> on
-         the same PVC via a separate rw volume. VLLM_CACHE_ROOT is a static
-         per-container path; per-model separation comes from the mount subPath
-         (the webhook's read-only /mnt/models mount stays untouched). */ -}}
+  {{- /* Persist torch.compile AOT artifacts under <subPath>/<cacheDir>/<name>,
+         reusing the existing kserve-pvc-source volume (a second volume for the
+         same claim stalls the pod on some backends). KServe's webhook dedups
+         volumeMounts by volume name, so once a mount with this name exists it
+         skips adding /mnt/models -- which is why BOTH server mounts must be
+         rendered here: the read-only model mount the webhook would otherwise
+         add, plus the read-write compile-cache mount. */ -}}
   {{- $ccEnv := dict "name" "VLLM_CACHE_ROOT" "value" $cc.mountPath -}}
-  {{- $ccMount := dict "name" "vllm-cache" "mountPath" $cc.mountPath "subPath" (printf "%s/%s/%s" .subPath $cc.cacheDir .name) -}}
+  {{- $modelMount := dict "name" $cacheVol "mountPath" "/mnt/models" "subPath" .subPath "readOnly" true -}}
+  {{- $ccMount := dict "name" $cacheVol "mountPath" $cc.mountPath "subPath" (printf "%s/%s/%s" .subPath $cc.cacheDir .name) -}}
   {{- $userModel = mergeOverwrite $userModel (dict
         "env" (append (default (list) $userModel.env) $ccEnv)
-        "volumeMounts" (append (default (list) $userModel.volumeMounts) $ccMount)) -}}
+        "volumeMounts" (concat (default (list) $userModel.volumeMounts) (list $modelMount $ccMount))) -}}
 {{- end -}}
 {{- $userModel = mergeOverwrite $userModel (dict "storageUri" (printf "pvc://%s/%s" $cacheClaim .subPath)) -}}
 {{- $modelSpec := $userModel -}}

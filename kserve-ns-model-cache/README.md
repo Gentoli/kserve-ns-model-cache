@@ -188,10 +188,15 @@ That renders, per model entry named `qwen3-8b-gguf` with
 `subPath: hf/qwen3-8b-gguf`:
 
 - PVC layout: `hf/qwen3-8b-gguf/cache/qwen3-8b-gguf/`
-- `kserve-container` gets a second, read-write mount of the same RWX claim at
-  `/vllm-cache` (subPath `hf/qwen3-8b-gguf/cache/qwen3-8b-gguf`); the webhook's read-only
-  `/mnt/models` mount is untouched
-- `VLLM_CACHE_ROOT=/vllm-cache` — a static per-container path; per-model
+- `kserve-container` reuses the existing `kserve-pvc-source` volume with two
+  mounts: the read-only model mount at `/mnt/models`
+  (subPath `hf/qwen3-8b-gguf`) and the read-write compile-cache mount at
+  `/mnt/cache` (subPath `hf/qwen3-8b-gguf/cache/qwen3-8b-gguf`) — no second
+  volume for the claim (two volumes on one claim stall the pod on some
+  backends). The chart renders both mounts itself because KServe's webhook
+  skips adding `/mnt/models` once a `kserve-pvc-source` mount exists (it dedups
+  volumeMounts by volume name).
+- `VLLM_CACHE_ROOT=/mnt/cache` — a static per-container path; per-model
   separation comes from the mount subPath, not the env value
 
 The populate init pre-creates `hf/qwen3-8b-gguf/cache/qwen3-8b-gguf/` on the PVC
