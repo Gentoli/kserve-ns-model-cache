@@ -71,13 +71,32 @@ hf:
 #     repo: unsloth/Qwen3-8B-GGUF   # HF repo containing .gguf weights
 #     quant: Q8_0                    # ONE quantized file to cache/serve (Q8_0, Q4_K_M, ...)
 #     file: ""                       # optional exact repo-relative filename override
-#     tokenizerRepo: ""              # tokenizer/config source, defaults to repo
+#     tokenizerRepo: ""              # tokenizer/config source, defaults to repo; set to
+#                                    # the official base repo when the GGUF repo does not
+#                                    # ship tokenizer files (e.g. Qwen/Qwen3.8-27B)
 #     revision: ""                   # optional HF revision for all downloads
+#     files: []                      # optional extra repo-relative files to cache
 #   Only the selected quant (plus shards, if split) and the small tokenizer/config
 #   files are downloaded to the cache -- never the whole multi-quant repo. The chart
 #   appends --model=/mnt/models:<quant> --tokenizer=/mnt/models to the model args and
 #   defaults model.runtime to kserve-vllmserver (the plugin-enabled vLLM runtime);
-#   set model.runtime to override for a differently-named runtime.
+#   set model.runtime to override for a differently-named runtime. Multimodal
+#   projector files (*mmproj*.gguf) are auto-detected and cached beside the backbone
+#   (best precision BF16 > F16 > F32); use files: to pin an exact one instead.
+#   The tokenizer allowlist also includes multimodal processor configs
+#   (preprocessor/processor/video_preprocessor_config.json) and the GPT-2-style
+#   BPE fallback (vocab.json + merges.txt), all best-effort. Auxiliary .gguf files
+#   such as imatrix_*.gguf are quantization-time inputs, not needed at serve time,
+#   and are NOT auto-downloaded; list them in files: if you want them on the cache.
+#   The ready marker stores a cache-format version + source fingerprint, so
+#   changing gguf.repo/quant/file/tokenizerRepo/revision/files (or upgrading to a
+#   populate script with a bumped CACHE_FORMAT_VERSION) re-downloads that subPath
+#   on the next pod start. File hashes (HF etags) are checked via metadata-only
+#   API calls on every pod start -- file content is downloaded only when a cached
+#   file changed or went missing. subPath is the cache key: multiple quants of the
+#   same model (same repo/tokenizerRepo/revision) may share one subPath and are
+#   added side by side; a different repo/tokenizer source on the same subPath
+#   fails at render time.
 #
 # Pass-through (merged into the rendered InferenceService; the chart only forces
 # predictor.volumes/initContainers and model.storageUri, and defaults

@@ -14,6 +14,25 @@
       (dict "name" $scriptVol "configMap" (dict "name" $cmName))
       (dict "name" $cacheVol "persistentVolumeClaim" (dict "claimName" $cacheClaim))
 -}}
+{{- /* subPath is the shared cache key: models reusing one must have an
+       identical source, or each pod would replace the other's cache. */ -}}
+{{- $subPaths := dict -}}
+{{- range .Values.models -}}
+  {{- $source := printf "hf|%s" (.hfUri | default "") -}}
+  {{- $gguf := .gguf | default dict -}}
+  {{- if and (hasKey $gguf "repo") $gguf.repo -}}
+    {{- /* Cache identity is repo-level: multiple quants of the same model may
+           share one subPath (each quant file is added and kept). */ -}}
+    {{- $source = printf "gguf|%s|%s|%s" $gguf.repo ($gguf.tokenizerRepo | default $gguf.repo) ($gguf.revision | default "") -}}
+  {{- end -}}
+  {{- if hasKey $subPaths .subPath -}}
+    {{- if ne (get $subPaths .subPath) $source -}}
+      {{- fail (printf "models[%s] reuses subPath '%s' with a different model source; give each model/quant its own subPath" .name .subPath) -}}
+    {{- end -}}
+  {{- else -}}
+    {{- $_ := set $subPaths .subPath $source -}}
+  {{- end -}}
+{{- end -}}
 {{- range .Values.models }}
 {{- $gguf := .gguf | default dict -}}
 {{- $isGguf := and (hasKey $gguf "repo") $gguf.repo -}}
@@ -50,6 +69,10 @@
   {{- if $gguf.revision -}}
     {{- $initArgs = append $initArgs "--revision" -}}
     {{- $initArgs = append $initArgs $gguf.revision -}}
+  {{- end -}}
+  {{- range $extra := $gguf.files -}}
+    {{- $initArgs = append $initArgs "--extra-file" -}}
+    {{- $initArgs = append $initArgs $extra -}}
   {{- end -}}
 {{- end -}}
 {{- $init := dict

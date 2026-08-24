@@ -124,6 +124,10 @@ For a `gguf:` entry the chart:
 - downloads only `*-<quant>.gguf` (all shards if split) and the tokenizer
   allowlist (`config.json`, `tokenizer.json`/`tokenizer.model`, …) into the
   subPath, flattening files to its root;
+- auto-detects a multimodal projector (`*mmproj*.gguf`, best precision
+  BF16 > F16 > F32) and caches it beside the backbone, so vision-capable GGUF
+  models load without extra vLLM config; add `gguf.files: [<name>]` to pin any
+  additional repo files instead;
 - defaults `model.runtime` to `kserve-vllmserver` (a prebuilt image containing
   `vllm-gguf-plugin`; override with `models[].model.runtime`) and
   `model.modelFormat` to `vLLM`/`1`;
@@ -134,6 +138,38 @@ For a `gguf:` entry the chart:
 The vLLM GGUF plugin is auto-loaded from the image (`vllm.general_plugins`) and
 auto-detects the `dir:quant` model reference; no `--quantization`/`--load-format`
 flags are required.
+
+**Tokenizer from a different repo:** this is the expected pattern (the plugin's
+own docs serve `repo:quant` with `--tokenizer <base-repo>`). Set
+`gguf.tokenizerRepo` to the official base repo, e.g.
+`Qwen/Qwen3.8-27B`, and the populate init caches that repo's tokenizer/config
+files into the same subPath — the served model stays fully offline. Weights and
+mmproj still come from the GGUF repo.
+
+**Auxiliary GGUF artifacts** such as `imatrix_*.gguf` are quantization-time
+inputs (used by llama.cpp to build quants, never loaded by vLLM), so they are
+not auto-downloaded. Add them to `gguf.files` if you want them on the cache.
+
+**Cache invalidation:** the `.ready` marker stores a cache-format version plus a
+fingerprint of the source (`repo`/`quant`/`file`/`tokenizerRepo`/`revision`/
+`files`). Changing any of those, or upgrading to a populate script with a bumped
+`CACHE_FORMAT_VERSION`, makes the next pod re-download that model's subPath
+automatically. Updating the chart does not restart existing pods, so scale or
+delete the ISVC pods to apply a new populate script.
+
+On every pod start the init compares each cached file's **HF etag** (via
+metadata-only API calls, `list_repo_files` + `get_paths_info` — never file
+content) and re-downloads in place only the files that changed or went missing.
+A fully fresh cache downloads zero bytes.
+
+**Sharing a subPath:** `subPath` is the cache key — one directory, one `.ready`
+marker, and one etag manifest per subPath. Models configured with the *same*
+source (repo/quant/tokenizer/revision/files) share a single download and a
+single refresh; the global lock serializes them. Multiple **quants of the same
+model** (same repo, tokenizer source, and revision) may also share one subPath —
+each quant's file is added and kept side by side, and the plugin's
+`/mnt/models:<quant>` resolution picks the right one. A different repo or
+tokenizer source on the same subPath is a conflict and fails at render time.
 
 ## Values
 
@@ -156,6 +192,7 @@ flags are required.
 | `models[].gguf.file` | `""` | Exact repo-relative filename override for non-standard names. |
 | `models[].gguf.tokenizerRepo` | `repo` | Where tokenizer/config files come from. |
 | `models[].gguf.revision` | `""` | HF revision for all GGUF downloads. |
+| `models[].gguf.files` | `[]` | Additional repo-relative files to cache (repeatable; mmproj is auto-detected otherwise). |
 | `models[].subPath` | — | PVC path; the shared key (init dest + `pvc://` subPath). |
 | `models[].predictor` | `{}` | Merged into `spec.predictor` (e.g. `minReplicas`, `affinity`). |
 | `models[].model` | `{}` | Merged into `spec.predictor.model` (e.g. `args`, `resources`, `runtime`). |
