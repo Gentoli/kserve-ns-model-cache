@@ -171,6 +171,50 @@ each quant's file is added and kept side by side, and the plugin's
 `/mnt/models:<quant>` resolution picks the right one. A different repo or
 tokenizer source on the same subPath is a conflict and fails at render time.
 
+## vLLM torch.compile cache
+
+vLLM's AOT compile (~5 minutes per pod) lands in `$VLLM_CACHE_ROOT`; the stock
+runtime puts that under `/tmp`, which is ephemeral, so every pod recompiles.
+Enable the shared cache to persist the artifacts on the same PVC, inside the
+model's own subPath:
+
+```yaml
+vllm:
+  compileCache:
+    enabled: true
+```
+
+That renders, per model entry named `qwen3-8b-gguf` with
+`subPath: hf/qwen3-8b-gguf`:
+
+- PVC layout: `hf/qwen3-8b-gguf/cache/qwen3-8b-gguf/`
+- `kserve-container` gets a second, read-write mount of the same RWX claim at
+  `/vllm-cache` (subPath `hf/qwen3-8b-gguf/cache/qwen3-8b-gguf`); the webhook's read-only
+  `/mnt/models` mount is untouched
+- `VLLM_CACHE_ROOT=/vllm-cache` — a static per-container path; per-model
+  separation comes from the mount subPath, not the env value
+
+The populate init pre-creates `hf/qwen3-8b-gguf/cache/qwen3-8b-gguf/` on the PVC
+so the server's subPath mount always resolves, including on the first pod.
+
+The first pod compiles once; every later pod (scale-out, restart, new node)
+reuses the artifacts. Adjust the paths via
+`vllm.compileCache.mountPath` / `.cacheDir`.
+
+**Why not an init container?** Compilation runs during model load, so a
+compile-warmup init would load the weights a second time and needs its own GPU
+allocation; the first pod would take *longer* (`2× weights + compile`). If even
+the first serving pod must skip compilation, pre-generate once with a one-off
+warmup Job (same vLLM image, same engine args, `VLLM_CACHE_ROOT` on the PVC)
+before scaling — not a per-pod init.
+
+**Caveats:** the cache hash includes vLLM/torch versions, engine args, and the
+model, so image or config changes create new hash dirs (clean them up
+periodically); nodes must have the same GPU architecture for the artifacts to
+be reusable; the compile cache mount shares the model subPath with the
+read-only `/mnt/models` mount, which requires your RWX backend to support both
+mounts.
+
 ## Values
 
 | Key | Default | Description |

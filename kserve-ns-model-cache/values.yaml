@@ -30,6 +30,27 @@ populate:
   # here for all models, or per model via models[].initResources.
   resources: {}
 
+# vLLM torch.compile AOT cache: persist VLLM_CACHE_ROOT on the same cache PVC,
+# inside each model's own subPath, so the ~5 minute compilation happens once per
+# model config, not once per pod. The first pod pays the compile cost; every
+# later pod (scale-out, restart, new node) reuses the artifacts.
+#
+# Layout on the PVC: <subPath>/<cacheDir>/<model name>/  (e.g.
+# hf/qwen3-8b-gguf/cache/qwen3-8b-gguf/). That directory is mounted read-write
+# inside kserve-container at mountPath via a separate volume (vllm-cache) that
+# references the same claim; the webhook's read-only /mnt/models mount uses
+# kserve-pvc-source and is untouched. VLLM_CACHE_ROOT is the static container
+# path <mountPath>. The populate init pre-creates the directory so the server's
+# subPath mount always resolves. Requires an RWX-capable backend.
+vllm:
+  compileCache:
+    enabled: false
+    # Static VLLM_CACHE_ROOT path inside kserve-container; the per-model
+    # separation comes from the mount subPath, not the env value.
+    mountPath: /vllm-cache
+    # Relative directory under the model subPath; the model name is appended.
+    cacheDir: cache
+
 # Shared cache PVC (one per namespace; all models share it).
 cache:
   pvc:

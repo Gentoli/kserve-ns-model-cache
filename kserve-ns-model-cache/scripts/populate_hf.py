@@ -151,6 +151,18 @@ def _remove_hf_cache_dirs(root: Path) -> None:
         shutil.rmtree(dirpath, ignore_errors=True)
 
 
+def _ensure_compile_cache_dir() -> None:
+    """Create the chart-requested vLLM compile cache dir (when configured).
+
+    The kserve-container mounts <subPath>/<cacheDir>/<name> via subPath; creating
+    it here (the init runs first, with the full PVC mounted rw) guarantees the
+    server's mount always resolves, including on the first pod.
+    """
+    value = os.environ.get("COMPILE_CACHE_DIR", "")
+    if value:
+        Path(value).mkdir(parents=True, exist_ok=True)
+
+
 def _ready_path(subpath: str) -> Path:
     return CACHE_ROOT / f".{subpath.replace('/', '_')}.ready"
 
@@ -440,6 +452,7 @@ def populate_hf(uri: str, subpath: str) -> Path:
 
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_compile_cache_dir()
 
     # Fast path: already cached -> no lock, no contention.
     if _ready_matches(ready, fingerprint):
@@ -501,6 +514,7 @@ def populate_gguf(
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.mkdir(parents=True, exist_ok=True)
+    _ensure_compile_cache_dir()
     _check_ready_identity(ready, identity)
 
     previously_cached = _ready_matches(ready, identity) and manifest_path.exists()
