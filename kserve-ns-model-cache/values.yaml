@@ -36,12 +36,14 @@ populate:
 # later pod (scale-out, restart, new node) reuses the artifacts.
 #
 # Layout on the PVC: <subPath>/<cacheDir>/<model name>/  (e.g.
-# hf/qwen3-8b-gguf/cache/qwen3-8b-gguf/). That directory is mounted read-write
-# inside kserve-container at mountPath via a separate volume (vllm-cache) that
-# references the same claim; the webhook's read-only /mnt/models mount uses
-# kserve-pvc-source and is untouched. VLLM_CACHE_ROOT is the static container
-# path <mountPath>. The populate init pre-creates the directory so the server's
-# subPath mount always resolves. Requires an RWX-capable backend.
+# hf/qwen3-8b-gguf/cache/qwen3-8b-gguf/), reusing the existing kserve-pvc-source
+# volume -- a second volume for the same claim stalls the pod on some backends.
+# When enabled, the chart renders both kserve-container mounts itself: the
+# read-only /mnt/models model mount the webhook would normally add (KServe
+# dedups volumeMounts by volume name, so it skips adding it once a mount with
+# that name exists) and the read-write compile cache mount at mountPath.
+# VLLM_CACHE_ROOT is the static container path <mountPath>. The populate init
+# pre-creates the directory so the server's subPath mount always resolves.
 vllm:
   compileCache:
     enabled: false
@@ -50,6 +52,12 @@ vllm:
     mountPath: /mnt/cache
     # Relative directory under the model subPath; the model name is appended.
     cacheDir: cache
+    # vLLM never cleans its compile cache. Set generation to a value that changes
+    # whenever the serving image or compile-relevant engine args change (e.g. the
+    # image tag); the populate init wipes that model's torch_compile_cache once
+    # when it differs from the recorded marker. An unchanged model keeps its
+    # cache indefinitely. Empty disables invalidation.
+    generation: ""
 
 # Shared cache PVC (one per namespace; all models share it).
 cache:

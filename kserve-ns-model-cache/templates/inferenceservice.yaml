@@ -61,6 +61,10 @@
   {{- /* Pre-create <subPath>/<cacheDir>/<name> on the PVC so the server's
          subPath mount below is guaranteed to exist at container start. */ -}}
   {{- $env = append $env (dict "name" "COMPILE_CACHE_DIR" "value" (printf "%s/%s/%s/%s" $cacheRoot .subPath $cc.cacheDir .name)) -}}
+  {{- if $cc.generation -}}
+    {{- /* vLLM never cleans its compile cache; wipe it when this key changes. */ -}}
+    {{- $env = append $env (dict "name" "COMPILE_CACHE_GENERATION" "value" $cc.generation) -}}
+  {{- end -}}
 {{- end -}}
 {{- $initArgs := list .hfUri .subPath -}}
 {{- if $isGguf -}}

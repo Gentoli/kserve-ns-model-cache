@@ -151,16 +151,44 @@ def _remove_hf_cache_dirs(root: Path) -> None:
         shutil.rmtree(dirpath, ignore_errors=True)
 
 
-def _ensure_compile_cache_dir() -> None:
-    """Create the chart-requested vLLM compile cache dir (when configured).
+def _prepare_compile_cache() -> None:
+    """Create the chart-requested vLLM compile cache dir; invalidate on bump.
 
     The kserve-container mounts <subPath>/<cacheDir>/<name> via subPath; creating
     it here (the init runs first, with the full PVC mounted rw) guarantees the
     server's mount always resolves, including on the first pod.
+
+    vLLM never garbage-collects its compile cache: every image/config change
+    creates a new hash dir under torch_compile_cache/ and the old ones stay
+    forever. COMPILE_CACHE_GENERATION is an explicit cache key: on first run the
+    marker is recorded and the cache is kept; whenever the value changes (e.g.
+    the serving image tag was bumped), the whole torch_compile_cache/ directory
+    is wiped once so stale artifacts are dropped. Unchanged models are never
+    touched, so their cache is never falsely invalidated.
     """
     value = os.environ.get("COMPILE_CACHE_DIR", "")
-    if value:
-        Path(value).mkdir(parents=True, exist_ok=True)
+    if not value:
+        return
+    cache_root = Path(value)
+    cache_root.mkdir(parents=True, exist_ok=True)
+
+    generation = os.environ.get("COMPILE_CACHE_GENERATION", "")
+    if not generation:
+        return
+
+    marker = cache_root / "generation"
+    try:
+        previous = marker.read_text()
+    except OSError:
+        previous = None
+    if previous is not None and previous != generation:
+        compile_root = cache_root / "torch_compile_cache"
+        if compile_root.is_dir():
+            shutil.rmtree(compile_root, ignore_errors=True)
+            logger.info(
+                "cleared vLLM compile cache (%s -> %s)", previous, generation
+            )
+    marker.write_text(generation)
 
 
 def _ready_path(subpath: str) -> Path:
@@ -452,7 +480,7 @@ def populate_hf(uri: str, subpath: str) -> Path:
 
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    _ensure_compile_cache_dir()
+    _prepare_compile_cache()
 
     # Fast path: already cached -> no lock, no contention.
     if _ready_matches(ready, fingerprint):
@@ -514,7 +542,7 @@ def populate_gguf(
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.mkdir(parents=True, exist_ok=True)
-    _ensure_compile_cache_dir()
+    _prepare_compile_cache()
     _check_ready_identity(ready, identity)
 
     previously_cached = _ready_matches(ready, identity) and manifest_path.exists()

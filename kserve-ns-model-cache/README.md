@@ -206,6 +206,14 @@ The first pod compiles once; every later pod (scale-out, restart, new node)
 reuses the artifacts. Adjust the paths via
 `vllm.compileCache.mountPath` / `.cacheDir`.
 
+vLLM never cleans the compile cache — every image/config change adds a new hash
+dir and the old ones stay forever. Set `vllm.compileCache.generation` to a value
+that changes when you upgrade the serving image or change compile-relevant
+engine args (e.g. the image tag). The populate init records it in a marker file
+and wipes that model's `torch_compile_cache` once when it changes; an unchanged
+model keeps its cache indefinitely (mtime-based pruning would delete a perfectly
+good cache after a quiet period, so it is not used).
+
 **Why not an init container?** Compilation runs during model load, so a
 compile-warmup init would load the weights a second time and needs its own GPU
 allocation; the first pod would take *longer* (`2× weights + compile`). If even
