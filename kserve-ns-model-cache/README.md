@@ -171,6 +171,77 @@ each quant's file is added and kept side by side, and the plugin's
 `/mnt/models:<quant>` resolution picks the right one. A different repo or
 tokenizer source on the same subPath is a conflict and fails at render time.
 
+## Custom ServingRuntimes (`runtimes[]`)
+
+The chart can install one or more KServe `ServingRuntime` definitions from the
+`runtimes[]` values list. A model selects one by setting its name on
+`models[].model.runtime`, so the values relationship is:
+
+```text
+models[].model.runtime == runtimes[].name
+```
+
+The default chart ships a `qwen-3090` runtime whose `qwen3090:` preset block
+uses the `ghcr.io/syv-ai/qwen38-27b-rtx3090` image:
+
+```yaml
+runtimes:
+  - name: qwen-3090
+    qwen3090:
+      mode: single        # or batch
+      image:
+        repository: ghcr.io/syv-ai/qwen38-27b-rtx3090
+        tag: latest
+      servedModelName: qwen3.8-27b
+      # modelPath: /app/models/...   # only when not using qwen's default dir
+```
+
+The chart expands that preset into a `ServingRuntime` whose container:
+
+- runs the image's entrypoint (`bash docker/entrypoint.sh`) with `single`
+  (`single-user/start_qwen.sh`); set `mode: batch` for throughput mode;
+- does not set `PORT` or pass `--port` — Knative injects `PORT=8080` into the
+  container itself and qwen's launcher (`PORT=${PORT:-18020}`) picks it up;
+  `EXTRA_ARGS` only carries `--served-model-name=qwen3.8-27b`;
+- mounts the whole cache PVC read-write at `/app/models` and `/cache`, so
+  qwen's own `prepare` step can requantize on the PVC and persist the `-fast` /
+  DFlash2 sibling checkpoints plus its HF/torch caches;
+- names those mounts `kserve-pvc-source`, KServe's internal volume name, so the
+  storage webhook reuses them instead of adding a separate `/mnt/models` mount;
+- declares `/health` readiness/startup probes and a memory-backed `/dev/shm`.
+
+Use it from `models[]` like this:
+
+```yaml
+models:
+  - name: qwen38-27b
+    hfUri: hf://dbirks/Qwen3.8-27B-W4A16-AutoRound
+    # This exact directory name matches qwen's default /app/models/<checkpoint>
+    subPath: Qwen3.8-27B-W4A16-AutoRound
+    predictor:
+      minReplicas: 0
+    model:
+      modelFormat:
+        name: vLLM
+        version: "1"
+      runtime: qwen-3090
+      resources:
+        requests:
+          cpu: "4"
+          memory: 8Gi
+        limits:
+          cpu: "4"
+          memory: 32Gi
+          nvidia.com/gpu: "1"
+```
+
+The populate init container still downloads `hfUri` into `subPath` once. On the
+first pod start qwen's entrypoint then runs its idempotent `prepare`/`verify`
+before serving — keep `minReplicas` low until the first pod is Ready. Leave
+`qwen3090.modelPath` unset to preserve qwen's default checkpoint path and
+`-fast` auto-selection; set it to an absolute path to point qwen at a different
+directory.
+
 ## vLLM torch.compile cache
 
 vLLM's AOT compile (~5 minutes per pod) lands in `$VLLM_CACHE_ROOT`; the stock
@@ -237,6 +308,9 @@ mounts.
 | `populate.cacheRoot` | `/cache` | PVC mount path in the init container (PVC root). |
 | `populate.hfHome` | `<cacheRoot>/.hf-home` | HF cache dir (`HF_HOME`) on the cache PVC (already mounted rw; no extra volume). Set to `/tmp` for an ephemeral per-pod cache. |
 | `populate.resources` | `{}` | Default init-container resources (none by default; per model: `models[].initResources`). |
+| `runtimes` | `[qwen-3090]` | ServingRuntime definitions rendered by the chart. A model references one by setting `models[].model.runtime` to its `name`. |
+| `runtimes[].name` | `qwen-3090` | Runtime name; must equal the model's `model.runtime`. |
+| `runtimes[].qwen3090` | preset | Qwen preset block (`mode`, `image`, `servedModelName`, optional `modelPath`, optional `mountPath`). |
 | `cache.pvc.name` / `.existingClaim` | `model-cache` / `""` | Cache PVC name, or bring your own. |
 | `cache.pvc.storageClassName` | `""` | RWX provisioner (nfs-csi, cephfs, efs, …). |
 | `cache.pvc.accessModes` | `[ReadWriteMany]` | PVC access modes; use `[ReadWriteOnce]` for a same-node (node-level) cache. |

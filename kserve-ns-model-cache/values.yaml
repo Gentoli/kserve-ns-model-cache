@@ -59,6 +59,29 @@ vllm:
     # cache indefinitely. Empty disables invalidation.
     generation: ""
 
+# Optional ServingRuntimes rendered by templates/servingruntimes.yaml.
+#
+# A models[].model.runtime value references one of these by .name. The qwen-3090
+# entry uses the qwen3090: preset block: the chart expands it into the full
+# ServingRuntime spec (image, entrypoint mode single|batch, served model name,
+# probes, cache-PVC mounts at /app/models and /cache). Knative injects
+# PORT=8080 itself; the qwen launcher picks that up, so no PORT env or port arg
+# is set here.
+runtimes:
+  - name: qwen-3090
+    qwen3090:
+      mode: single          # single = single-user/start_qwen.sh, batch = batch/start_qwen.sh
+      image:
+        repository: ghcr.io/syv-ai/qwen38-27b-rtx3090
+        tag: latest
+        pullPolicy: IfNotPresent
+      mountPath: /app/models
+      servedModelName: qwen3.8-27b
+      # Optional absolute MODEL override. Leave empty so qwen uses its default
+      # /app/models/Qwen3.8-27B-W4A16-AutoRound and auto-selects -fast in single
+      # mode.
+      modelPath: ""
+
 # Shared cache PVC (one per namespace; all models share it).
 cache:
   pvc:
@@ -156,3 +179,25 @@ models:
           cpu: "4"
           memory: 20Gi
           nvidia.com/gpu.shared: "1"
+  - name: qwen38-27b
+    hfUri: hf://dbirks/Qwen3.8-27B-W4A16-AutoRound
+    # Directory name qwen's image expects under /app/models. The qwen-3090
+    # runtime (see runtimes[]) mounts the PVC root at /app/models, so this
+    # exact name is what qwen's prepare and start scripts resolve without a
+    # MODEL override.
+    subPath: Qwen3.8-27B-W4A16-AutoRound
+    predictor:
+      minReplicas: 0
+    model:
+      modelFormat:
+        name: vLLM
+        version: "1"
+      runtime: qwen-3090
+      resources:
+        requests:
+          cpu: "4"
+          memory: 8Gi
+        limits:
+          cpu: "4"
+          memory: 32Gi
+          nvidia.com/gpu: "1"

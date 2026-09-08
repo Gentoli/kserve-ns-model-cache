@@ -7,6 +7,9 @@ Rendered resources:
 {{- else }}
   - using existing PVC     {{ .Values.cache.pvc.existingClaim }}
 {{- end }}
+{{- range .Values.runtimes }}
+  - ServingRuntime         {{ .name }}
+{{- end }}
 {{- range .Values.models }}
   - InferenceService       {{ .name }}  <- {{ .hfUri }}  (pvc://{{ $.Values.cache.pvc.existingClaim | default $.Values.cache.pvc.name }}/{{ .subPath }})
 {{- end }}
@@ -18,7 +21,9 @@ How it works:
   storageUri is pvc://<claim>/<subPath>, so the webhook mounts that PVC subPath
   read-only at /mnt/models on kserve-container -- the model is served zero-copy
   (no symlinks, no per-pod copy). Both vLLM and the HuggingFace runtime read
-  /mnt/models, so no runtime rewiring is needed.
+  /mnt/models, so no runtime rewiring is needed. Custom runtimes (runtimes[])
+  may declare their own kserve-pvc-source mounts (e.g. qwen-3090 at /app/models
+  and /cache); the webhook then reuses those instead of adding /mnt/models.
 
 Prerequisites / next steps:
   1. RWX storage: set cache.pvc.storageClassName to an RWX provisioner
@@ -28,6 +33,8 @@ Prerequisites / next steps:
   3. Gated repos: create the HF token secret and set hf.tokenSecret.name:
        kubectl -n {{ .Release.Namespace }} create secret generic hf-secret --from-literal=token=hf_xxx
   4. vLLM: set models[].runtime to your vLLM ServingRuntime/ClusterServingRuntime name.
+     Custom runtimes defined under runtimes[] are installed by this release and
+     referenced the same way (e.g. qwen-3090 in the qwen38-27b preset).
      GGUF: set models[].gguf.repo/quant instead of hfUri -- the chart defaults
      model.runtime to kserve-vllmserver (must be a plugin-enabled vLLM image) and
      serves --model=/mnt/models:<quant> from the cached tokenizer at /mnt/models.

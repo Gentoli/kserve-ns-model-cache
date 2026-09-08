@@ -1,0 +1,87 @@
+{{- range .Values.runtimes }}
+{{- if dig "enabled" true . }}
+{{- $hasQwen := hasKey . "qwen3090" }}
+{{- $qwen := dict }}
+{{- $extraArgs := "" }}
+{{- if $hasQwen }}
+{{- $qwen = .qwen3090 | default dict }}
+{{- end }}
+{{- if and $hasQwen $qwen.servedModelName }}
+{{- $extraArgs = printf "--served-model-name=%s" $qwen.servedModelName }}
+{{- end }}
+{{- if $hasQwen }}
+---
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "kserve-ns-model-cache.labels" $ | nindent 4 }}
+spec:
+  supportedModelFormats:
+    - name: vLLM
+      version: "1"
+  containers:
+    - name: kserve-container
+      image: {{ printf "%s:%s" ($qwen.image.repository | default "ghcr.io/syv-ai/qwen38-27b-rtx3090") ($qwen.image.tag | default "latest") }}
+      imagePullPolicy: {{ $qwen.image.pullPolicy | default "IfNotPresent" }}
+      args:
+        - {{ $qwen.mode | default "single" | quote }}
+      env:
+        {{- if $qwen.modelPath }}
+        - name: MODEL
+          value: {{ $qwen.modelPath | quote }}
+        {{- end }}
+        {{- if $extraArgs }}
+        - name: EXTRA_ARGS
+          value: {{ $extraArgs | quote }}
+        {{- end }}
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        failureThreshold: 3
+        periodSeconds: 10
+        successThreshold: 1
+        timeoutSeconds: 5
+      startupProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        failureThreshold: 90
+        periodSeconds: 30
+        successThreshold: 1
+        timeoutSeconds: 10
+        initialDelaySeconds: 30
+      volumeMounts:
+        - name: kserve-pvc-source
+          mountPath: {{ $qwen.mountPath | default "/app/models" | quote }}
+          readOnly: false
+        - name: kserve-pvc-source
+          mountPath: /cache
+          readOnly: false
+        - name: devshm
+          mountPath: /dev/shm
+  volumes:
+    - name: devshm
+      emptyDir:
+        medium: Memory
+{{- else if hasKey . "spec" }}
+---
+apiVersion: {{ .apiVersion | default "serving.kserve.io/v1alpha1" }}
+kind: {{ .kind | default "ServingRuntime" }}
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "kserve-ns-model-cache.labels" $ | nindent 4 }}
+  {{- with .annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- toYaml .spec | nindent 2 }}
+{{- else }}
+  {{- fail (printf "runtimes[%s] must define a qwen3090 preset block or a spec" (.name | default "<unnamed>")) }}
+{{- end }}
+{{- end }}
+{{- end }}
