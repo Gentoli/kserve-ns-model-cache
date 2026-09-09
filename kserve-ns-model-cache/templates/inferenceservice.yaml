@@ -19,6 +19,20 @@
 {{- /* subPath is the shared cache key: models reusing one must have an
        identical source, or each pod would replace the other's cache. */ -}}
 {{- $subPaths := dict -}}
+{{- /* A qwen3090 preset's enabled drafter occupies its own cache dir under the
+       same key; register it first so no models[] entry (or second runtime's
+       drafter) claims that subPath from a different source. */ -}}
+{{- range .Values.runtimes -}}
+  {{- $d := (.qwen3090 | default dict).drafter | default dict -}}
+  {{- if and $d.hfUri $d.subPath (ne ($d.enabled | default true) false) -}}
+    {{- $source := printf "hf|%s" $d.hfUri -}}
+    {{- if and (hasKey $subPaths $d.subPath) (ne (get $subPaths $d.subPath) $source) -}}
+      {{- fail (printf "runtimes[%s] drafter reuses subPath '%s' with a different model source; give each model/quant its own subPath" (.name | default "<unnamed>") $d.subPath) -}}
+    {{- else -}}
+      {{- $_ := set $subPaths $d.subPath $source -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
 {{- range .Values.models -}}
   {{- $source := printf "hf|%s" (.hfUri | default "") -}}
   {{- $gguf := .gguf | default dict -}}
@@ -100,6 +114,7 @@
 {{- with (.initResources | default $defaultInitResources) -}}
   {{- $_ := set $init "resources" . -}}
 {{- end -}}
+{{- $inits := list $init -}}
 {{- /* model spec: user passthrough + chart-forced storageUri + defaults */ -}}
 {{- $userModel := deepCopy (.model | default dict) -}}
 {{- if $isGguf -}}
@@ -114,6 +129,47 @@
   {{- $userModel = mergeOverwrite $userModel (dict "args" (concat (default (list) $userModel.args) $forcedArgs)) -}}
 {{- else -}}
   {{- $userModel = mergeOverwrite (dict "modelFormat" (dict "name" "huggingface")) $userModel -}}
+{{- end -}}
+{{- /* Qwen runtime: the shared ServingRuntime only mounts /cache. The model
+       mount is per InferenceService so it can use THIS model's subPath instead
+       of exposing the whole cache PVC. models[].subPath is the PVC-side cache
+       directory; qwen3090.mountPath is the fixed container path qwen expects
+       its checkpoint at (they are intentionally different). */ -}}
+{{- $qwen := dict -}}
+{{- range $rt := $.Values.runtimes -}}
+  {{- if and (hasKey $rt "qwen3090") (eq ($rt.name | default "") ($userModel.runtime | default "")) -}}
+    {{- $qwen = $rt.qwen3090 -}}
+  {{- end -}}
+{{- end -}}
+{{- if $qwen -}}
+  {{- $qwenMounts := concat (default (list) $userModel.volumeMounts) (list (dict
+        "name" $cacheVol
+        "mountPath" ($qwen.modelPath | default $qwen.mountPath | default "/app/models/Qwen3.8-27B-W4A16-AutoRound-fast")
+        "subPath" .subPath
+        "readOnly" true)) -}}
+  {{- $draft := $qwen.drafter | default dict -}}
+  {{- $draftOn := and $draft.hfUri (ne ($draft.enabled | default true) false) -}}
+  {{- if and $draftOn (or (not $draft.subPath) (not $draft.mountPath)) -}}
+    {{- fail "qwen3090 drafter enabled but needs subPath and mountPath (set both, or drafter.enabled: false)" -}}
+  {{- end -}}
+  {{- if $draftOn -}}
+    {{- /* SPEC=dflash2: qwen's launcher scans /app/models/Qwen3.8-27B-DFlash2-W4A16
+           for the drafter and aborts without it (the image's own prepare step
+           fetches it, which pods running the chart bypass). A second populate
+           init fills drafter.subPath on the shared cache; mount that dir
+           read-only off the same kserve-pvc-source volume where the launcher
+           looks. */ -}}
+    {{- $qwenMounts = concat $qwenMounts (list (dict
+          "name" $cacheVol
+          "subPath" $draft.subPath
+          "mountPath" $draft.mountPath
+          "readOnly" true)) -}}
+    {{- $draftInit := deepCopy $init -}}
+    {{- $draftInit = set $draftInit "name" "populate-hf-drafter" -}}
+    {{- $draftInit = set $draftInit "args" (list $draft.hfUri $draft.subPath) -}}
+    {{- $inits = append $inits $draftInit -}}
+  {{- end -}}
+  {{- $userModel = mergeOverwrite $userModel (dict "volumeMounts" $qwenMounts) -}}
 {{- end -}}
 {{- if $ccEnabled -}}
   {{- /* Persist torch.compile AOT artifacts under <subPath>/<cacheDir>/<name>,
@@ -136,7 +192,7 @@
 {{- $userPredictor := deepCopy (.predictor | default dict) -}}
 {{- $predictorSpec := mergeOverwrite $userPredictor (dict
       "volumes" $volumes
-      "initContainers" (list $init)
+      "initContainers" $inits
       "model" $modelSpec)
 -}}
 ---

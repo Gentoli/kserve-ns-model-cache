@@ -22,8 +22,10 @@ How it works:
   read-only at /mnt/models on kserve-container -- the model is served zero-copy
   (no symlinks, no per-pod copy). Both vLLM and the HuggingFace runtime read
   /mnt/models, so no runtime rewiring is needed. Custom runtimes (runtimes[])
-  may declare their own kserve-pvc-source mounts (e.g. qwen-3090 at /app/models
-  and /cache); the webhook then reuses those instead of adding /mnt/models.
+  may declare their own kserve-pvc-source mounts (e.g. qwen-3090 mounts /cache;
+  each qwen model's InferenceService additionally mounts its own subPath at
+  qwen3090.mountPath); the webhook then reuses those instead of adding
+  /mnt/models.
 
 Prerequisites / next steps:
   1. RWX storage: set cache.pvc.storageClassName to an RWX provisioner

@@ -64,9 +64,11 @@ vllm:
 # A models[].model.runtime value references one of these by .name. The qwen-3090
 # entry uses the qwen3090: preset block: the chart expands it into the full
 # ServingRuntime spec (image, entrypoint mode single|batch, served model name,
-# probes, cache-PVC mounts at /app/models and /cache). Knative injects
-# PORT=8080 itself; the qwen launcher picks that up, so no PORT env or port arg
-# is set here.
+# probes, and the /cache mount). The model mount is per InferenceService: each
+# qwen model's ISVC mounts only its models[].subPath (PVC-side cache dir) at
+# qwen3090.mountPath (the fixed container path qwen expects), so the rest of the
+# shared cache PVC is not exposed. Knative injects PORT=8080 itself; the qwen
+# launcher picks that up, so no PORT env or port arg is set here.
 runtimes:
   - name: qwen-3090
     qwen3090:
@@ -75,12 +77,30 @@ runtimes:
         repository: ghcr.io/syv-ai/qwen38-27b-rtx3090
         tag: latest
         pullPolicy: IfNotPresent
-      mountPath: /app/models
+      # Exact container path qwen expects its checkpoint at. Each qwen model's
+      # models[].subPath is mounted here regardless of the PVC-side cache dir
+      # name. single mode serves the -fast variant; use the base directory name
+      # for mode: batch.
+      mountPath: /app/models/Qwen3.8-27B-W4A16-AutoRound-fast
       servedModelName: qwen3.8-27b
-      # Optional absolute MODEL override. Leave empty so qwen uses its default
-      # /app/models/Qwen3.8-27B-W4A16-AutoRound and auto-selects -fast in single
-      # mode.
+      # Optional absolute MODEL override; when set it should match mountPath.
       modelPath: ""
+      # DFlash2 block drafter for SPEC=dflash2 single mode (the recommended
+      # profile). The image's own prepare step fetches it by default
+      # (docker/prepare.sh, DFLASH2=1); pods running the chart bypass that
+      # step, so a second populate init downloads drafter.hfUri into
+      # drafter.subPath on the shared cache PVC (one fetch per namespace), and
+      # every ISVC on this runtime mounts that dir read-only at
+      # drafter.mountPath — the path single-user/start_qwen.sh probes and
+      # aborts without for SPEC=dflash2. Keep mountPath as-is (it is the
+      # launcher default) or set DRAFT= in the model env to wherever you moved
+      # it. drafter.enabled: false skips the ~1.2 GB fetch for a
+      # SPEC=mtp-only deployment.
+      drafter:
+        enabled: true
+        hfUri: hf://syvai/Qwen3.8-27B-DFlash2-W4A16
+        subPath: hf/qwen3-dflash2
+        mountPath: /app/models/Qwen3.8-27B-DFlash2-W4A16
 
 # Shared cache PVC (one per namespace; all models share it).
 cache:
@@ -181,10 +201,9 @@ models:
           nvidia.com/gpu.shared: "1"
   - name: qwen38-27b
     hfUri: hf://dbirks/Qwen3.8-27B-W4A16-AutoRound
-    # Directory name qwen's image expects under /app/models. The qwen-3090
-    # runtime (see runtimes[]) mounts the PVC root at /app/models, so this
-    # exact name is what qwen's prepare and start scripts resolve without a
-    # MODEL override.
+    # PVC-side cache directory for this checkpoint. The qwen-3090 runtime (see
+    # runtimes[]) mounts THIS subPath at qwen3090.mountPath; the two names do
+    # not have to match.
     subPath: Qwen3.8-27B-W4A16-AutoRound
     predictor:
       minReplicas: 0

@@ -55,9 +55,6 @@ spec:
         initialDelaySeconds: 30
       volumeMounts:
         - name: kserve-pvc-source
-          mountPath: {{ $qwen.mountPath | default "/app/models" | quote }}
-          readOnly: false
-        - name: kserve-pvc-source
           mountPath: /cache
           readOnly: false
         - name: devshm

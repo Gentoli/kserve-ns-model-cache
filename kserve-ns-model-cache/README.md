@@ -203,12 +203,23 @@ The chart expands that preset into a `ServingRuntime` whose container:
 - does not set `PORT` or pass `--port` — Knative injects `PORT=8080` into the
   container itself and qwen's launcher (`PORT=${PORT:-18020}`) picks it up;
   `EXTRA_ARGS` only carries `--served-model-name=qwen3.8-27b`;
-- mounts the whole cache PVC read-write at `/app/models` and `/cache`, so
-  qwen's own `prepare` step can requantize on the PVC and persist the `-fast` /
-  DFlash2 sibling checkpoints plus its HF/torch caches;
+- mounts the cache PVC read-write at `/cache`, and each qwen InferenceService
+  additionally mounts **only that model's `subPath`** at
+  `qwen3090.mountPath` (default `/app/models/Qwen3.8-27B-W4A16-AutoRound-fast`)
+  — the PVC cache directory and qwen's container checkpoint path are different,
+  and only the model's own subPath is exposed;
 - names those mounts `kserve-pvc-source`, KServe's internal volume name, so the
   storage webhook reuses them instead of adding a separate `/mnt/models` mount;
-- declares `/health` readiness/startup probes and a memory-backed `/dev/shm`.
+- declares `/health` readiness/startup probes and a memory-backed `/dev/shm`;
+- fetches the DFlash2 block drafter for `SPEC=dflash2` single mode
+  (`qwen3090.drafter`, enabled by default): a second populate init downloads
+  `drafter.hfUri` into `drafter.subPath` on the shared cache PVC (one fetch per
+  namespace), and every ISVC on this runtime mounts that dir read-only at
+  `drafter.mountPath` — the exact path qwen's launcher probes
+  (`single-user/start_qwen.sh`) and aborts without. The image's own prepare
+  step would fetch it too (`docker/prepare.sh`, `DFLASH2=1`), which pods
+  running the chart bypass. Set `drafter.enabled: false` for a `SPEC=mtp`-only
+  deployment (skips the ~1.2 GB fetch).
 
 Use it from `models[]` like this:
 
@@ -216,7 +227,7 @@ Use it from `models[]` like this:
 models:
   - name: qwen38-27b
     hfUri: hf://dbirks/Qwen3.8-27B-W4A16-AutoRound
-    # This exact directory name matches qwen's default /app/models/<checkpoint>
+    # PVC-side cache dir; mounted at qwen3090.mountPath for the qwen image.
     subPath: Qwen3.8-27B-W4A16-AutoRound
     predictor:
       minReplicas: 0
@@ -235,12 +246,22 @@ models:
           nvidia.com/gpu: "1"
 ```
 
-The populate init container still downloads `hfUri` into `subPath` once. On the
-first pod start qwen's entrypoint then runs its idempotent `prepare`/`verify`
-before serving — keep `minReplicas` low until the first pod is Ready. Leave
-`qwen3090.modelPath` unset to preserve qwen's default checkpoint path and
-`-fast` auto-selection; set it to an absolute path to point qwen at a different
-directory.
+The populate init container still downloads `hfUri` into `subPath` once. Each
+qwen InferenceService renders its own `kserve-pvc-source` mount from that value
+(`subPath: <subPath>`) at `qwen3090.mountPath`, so the checkpoint is exposed
+only to the qwen pod that serves it. Leave `qwen3090.modelPath` unset when
+`qwen3090.mountPath` is the directory qwen's launcher selects by default; set
+it to an absolute path (matching the mount) when serving a differently-named
+checkpoint directory.
+
+When the preset's `qwen3090.drafter` is enabled (the default), each ISVC on the
+runtime also mounts the drafter's cache dir at a second fixed path, so
+`SPEC=dflash2` finds its drafter without any `DRAFT=` env. `drafter.subPath` is
+the PVC-side cache dir (the shared key, like any model's: one fetch per
+namespace, `.ready`-fast-path on later pods) and `drafter.mountPath` the
+container path qwen's launcher probes. Change `mountPath` only together with a
+`DRAFT=` env pointing the launcher at the new location. The drafter never gets
+a `storageUri` — it is populated and mounted, not served as a model.
 
 ## vLLM torch.compile cache
 
@@ -311,6 +332,10 @@ mounts.
 | `runtimes` | `[qwen-3090]` | ServingRuntime definitions rendered by the chart. A model references one by setting `models[].model.runtime` to its `name`. |
 | `runtimes[].name` | `qwen-3090` | Runtime name; must equal the model's `model.runtime`. |
 | `runtimes[].qwen3090` | preset | Qwen preset block (`mode`, `image`, `servedModelName`, optional `modelPath`, optional `mountPath`). |
+| `runtimes[].qwen3090.drafter.enabled` | `true` | Fetch + mount the DFlash2 block drafter (`SPEC=dflash2`); `false` skips the ~1.2 GB fetch for `SPEC=mtp`-only. |
+| `runtimes[].qwen3090.drafter.hfUri` | `hf://syvai/Qwen3.8-27B-DFlash2-W4A16` | Source of the prebuilt W4A16 drafter. |
+| `runtimes[].qwen3090.drafter.subPath` | `hf/qwen3-dflash2` | PVC cache dir (shared key, like any model's subPath). |
+| `runtimes[].qwen3090.drafter.mountPath` | `/app/models/Qwen3.8-27B-DFlash2-W4A16` | Container path the launcher probes; changing it requires `DRAFT=` in the model env. |
 | `cache.pvc.name` / `.existingClaim` | `model-cache` / `""` | Cache PVC name, or bring your own. |
 | `cache.pvc.storageClassName` | `""` | RWX provisioner (nfs-csi, cephfs, efs, …). |
 | `cache.pvc.accessModes` | `[ReadWriteMany]` | PVC access modes; use `[ReadWriteOnce]` for a same-node (node-level) cache. |
